@@ -44,9 +44,6 @@ static void
 tunnel_teardown(struct tunnel * tun){
 	char buffer[32768];
 	int n_read = 0;
-	/* let's read everything to see whether flags are removed */
-	n_read = recvfrom(tun->in_pfd->fd, buffer, 32768, 0, NULL, NULL);
-	n_read = recvfrom(tun->out_pfd->fd, buffer, 32768, 0, NULL, NULL);
 
 	close(tun->in_pfd->fd);
 	tun->in_pfd->fd = -1;
@@ -58,7 +55,6 @@ tunnel_teardown(struct tunnel * tun){
 
 static int
 tunnel_extract_details(struct tunnel * tun){
-	// char tor_ip[] = "91.123.201.232";
 	char buf[TUN_HDR_LEN];
 	struct tunnel_hdr hdr;
 	int n_read;
@@ -144,11 +140,19 @@ process_tunnel(struct tunnel * tun){
 			tunnel_forward(tun->in_pfd, tun->out_pfd, tun);
 		}
 		else{
-			printf("not forwarding data because peer is down...");
+			printf("not forwarding data because peer is down...\n");
 		}
 	}
-	if (tun->out_pfd->revents & POLLIN){
-		tunnel_forward(tun->out_pfd, tun->in_pfd, tun);
+	else if (tun->out_pfd->revents & (POLLIN | POLLERR)){
+		if (tun->type == TUNNEL_UNINIT){
+			printf("strange...shouldn't receive data from an uninit tunnel..\n");
+		}
+		else if (tun->in_pfd->fd != -1){
+			tunnel_forward(tun->out_pfd, tun->in_pfd, tun);
+		}
+		else{
+			printf("not forwarding data because tor peer is down...\n");
+		}
 	}
 }
 
@@ -175,6 +179,9 @@ check_new_connection(struct pollfd * fds, struct tunnel * tunnels){
 		}
 		if (i == MAX_TUNNELS){
 			printf("error - no tunnel available...\n");
+		}
+		else{
+			printf("accepted new connection from tor-client\n");
 		}
 
 	}

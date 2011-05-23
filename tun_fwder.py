@@ -53,6 +53,7 @@ class ForwarderHandler(AsyncoreTcp):
             # sys.exit(0)
         # pickup a random bridge from the ones we have.
         bridge = bridges[random.randint(0,len(bridges) - 1)]
+        logger.info("send connection request for bridge %s:%d" % (bridge[0],bridge[1]))
         self.enqueue_send(TunnelSetupMsg(bridge[0],bridge[1], TUNNEL_TOR).pack())
 
     def handle_read(self):
