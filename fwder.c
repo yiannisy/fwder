@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <limits.h>
+#include <pthread.h>
 
 #define LISTEN_PORT 9999
 
@@ -20,6 +21,10 @@
 #define MAX_TUNNELS 127
 #define TUN_HDR_LEN 48
 
+#define MAX_RELAYS 10000
+#define DIRECTORY_IP "193.23.244.244"
+#define DIRECTORY_URL "dannenberg.ccc.de"
+
 struct tunnel {
 	uint16_t tunnel_id; // unique ID
 	uint16_t type; // type for the tunnel
@@ -30,6 +35,7 @@ struct tunnel {
 	struct pollfd * in_pfd; // incoming polling socket
 	struct pollfd * out_pfd; // outgoig polling socket
 	struct sockaddr_in nexthop_addr; // the address to forward data to
+	char nexthop_fp[41];
 };
 
 struct tunnel_hdr {
@@ -42,6 +48,35 @@ struct tunnel_hdr {
 static void
 update_tor_dir(){
 }
+
+//static void *
+//directory_service(void *arg){
+//	int sock;
+//	struct sockaddr_in dir_addr;
+//	int resp_len = 0;
+//	char buffer[1600];
+//	char response[MAX_RELAY*10000]
+//	int n_read;
+//
+//	char request =
+//
+//
+//	while(1){
+//		printf("Updating from directory\n");
+//		sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+//		if (connect(sock, (struct sockaddr*)dir_addr, sizeof(struct sockaddr)) < 0){
+//			printf("cannot connect to the directory\n");
+//		}
+//		else{
+//			write(sock, request, req_len);
+//			while (n_read = recvfrom(sock, buffer, 32768, 0, NULL, NULL) > 0){
+//				memcpy(response, buffer, n_read);
+//				resp_len += n_read;
+//			}
+//		}
+//
+//	}
+//}
 
 static void
 tunnel_teardown(struct tunnel * tun){
@@ -73,6 +108,7 @@ tunnel_extract_details(struct tunnel * tun){
 	tun->nexthop_addr.sin_family = AF_INET;
 	tun->nexthop_addr.sin_port = hdr.port;
 	tun->nexthop_addr.sin_addr.s_addr = hdr.addr;
+	memcpy(tun->nexthop_fp,tmp_buf, 41);
 
 	printf("Setting up tunnel of type %d with %s:%d (fp:%s)\n", tun->type, inet_ntoa(tun->nexthop_addr.sin_addr), ntohs(hdr.port), tmp_buf);
 	return 0;
@@ -80,7 +116,46 @@ tunnel_extract_details(struct tunnel * tun){
 
 static int
 tunnel_verify(struct tunnel * tun){
-	return 0;
+	char request[1000];
+	char buffer[32768];
+	int offset;
+	char path[1000];
+	int sock, n_read;
+	char * status;
+	struct sockaddr_in dir_addr;
+	dir_addr.sin_family = AF_INET;
+	dir_addr.sin_port = htons(80);
+	dir_addr.sin_addr.s_addr = inet_addr(DIRECTORY_IP);
+	offset = 0;
+
+
+	sprintf(path,"/tor/server/fp/%s",tun->nexthop_fp);
+	sprintf(request, "GET %s HTTP/1.0\r\nHOST:%s \r\n\r\n", path, DIRECTORY_URL);
+	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if(connect(sock, (struct sockaddr*)&dir_addr, sizeof(struct sockaddr)) < 0){
+		printf("cannot connect to the directory\n");
+		return -1;
+	}
+	else{
+		write(sock, request, strlen(request));
+		while((n_read = recvfrom(sock, buffer + offset, 32768, 0, NULL, NULL)) > 0){
+			offset += n_read;
+		}
+		/* the first line contains the http response code. */
+		status = strtok(buffer,"\n");
+		if (strstr(status,"200")){
+			/* status is OK! */
+			return 0;
+		}
+		else if(strstr(status,"404")){
+			printf("failed to verify tunnel\n");
+			return -1;
+		}
+		else {
+			printf("unknown status while verifying tunnel: %s\n",status);
+			return -1;
+		}
+	}
 }
 
 static int
@@ -93,8 +168,10 @@ tunnel_init(struct tunnel * tun){
 	}
 	if (tunnel_verify(tun) == -1){
 		printf("cannot verify tunnel...\n");
+		tunnel_teardown(tun);
 		return -1;
 	}
+	printf("successfully initialized and verified tunnel\n");
 	printf("Connecting to peer...");
 	peer_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (connect(peer_fd, (struct sockaddr*)&tun->nexthop_addr, sizeof(struct sockaddr)) < 0){
@@ -200,6 +277,13 @@ main(int argc, char *argv[])
 	struct sockaddr_in listen_addr;
 	struct pollfd fds[MAX_SOCKETS];
 	struct tunnel tunnels[MAX_TUNNELS];
+
+	struct tunnel known_relays[MAX_RELAYS];
+	pthread_t dir_serv;
+	/* start a thread for directory updates */
+//	pthread_create(&dir_serv,NULL, directory_service, known_relays);
+
+
 
 	/* initialize the sockets */
 	for (i=0; i < MAX_SOCKETS; i++){
