@@ -32,7 +32,6 @@ endef
 
 define Package/torproxy
   $(call Package/torproxy/Default)
-  DEPENDS:=+ucitrigger
   TITLE:=Tor Proxy Utility
 endef
 
