@@ -57,7 +57,7 @@ endef
 
 define Package/torproxy/install
 	$(INSTALL_DIR) $(1)/usr/bin/
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/snmp_tunnel $(1)/usr/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/fwder $(1)/usr/bin/
 endef
 
 $(eval $(call BuildPackage,torproxy))
