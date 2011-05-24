@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
@@ -13,10 +14,11 @@
 
 #define TUNNEL_UNINIT 0
 #define TUNNEL_TOR 1
+#define FP_LEN 40
 
 #define MAX_SOCKETS 255
 #define MAX_TUNNELS 127
-#define TUN_HDR_LEN 8
+#define TUN_HDR_LEN 48
 
 struct tunnel {
 	uint16_t tunnel_id; // unique ID
@@ -34,6 +36,7 @@ struct tunnel_hdr {
 	uint32_t addr;
 	uint16_t port;
 	uint16_t type;
+	char fp[FP_LEN];
 };
 
 static void
@@ -42,9 +45,6 @@ update_tor_dir(){
 
 static void
 tunnel_teardown(struct tunnel * tun){
-	char buffer[32768];
-	int n_read = 0;
-
 	close(tun->in_pfd->fd);
 	tun->in_pfd->fd = -1;
 	close(tun->out_pfd->fd);
@@ -55,23 +55,26 @@ tunnel_teardown(struct tunnel * tun){
 
 static int
 tunnel_extract_details(struct tunnel * tun){
-	char buf[TUN_HDR_LEN];
 	struct tunnel_hdr hdr;
 	int n_read;
+	char tmp_buf[41];
 
 	n_read = recvfrom(tun->in_pfd->fd, (char *)&hdr, TUN_HDR_LEN, 0, NULL, NULL);
 	if(n_read != TUN_HDR_LEN){
-		printf("cannot extract tunnel details - not enough info (%d bytes received\n",
+		printf("cannot extract tunnel details - not enough info (%d bytes received)\n",
 				n_read);
 	}
+
+	/* add null-based term character */
+	memcpy(tmp_buf,hdr.fp,40);
+	tmp_buf[40] = '\0';
 
 	tun->type = ntohs(hdr.type);
 	tun->nexthop_addr.sin_family = AF_INET;
 	tun->nexthop_addr.sin_port = hdr.port;
 	tun->nexthop_addr.sin_addr.s_addr = hdr.addr;
 
-	printf("Setting up tunnel of type %d with %s:%d\n", tun->type,
-			inet_ntoa(hdr.addr), ntohs(hdr.port));
+	printf("Setting up tunnel of type %d with %s:%d (fp:%s)\n", tun->type, inet_ntoa(tun->nexthop_addr.sin_addr), ntohs(hdr.port), tmp_buf);
 	return 0;
 }
 
@@ -86,11 +89,11 @@ tunnel_init(struct tunnel * tun){
 
 	if(tunnel_extract_details(tun) == -1){
 		printf("cannot extract tunnel details...\n");
-		return;
+		return -1;
 	}
 	if (tunnel_verify(tun) == -1){
 		printf("cannot verify tunnel...\n");
-		return;
+		return -1;
 	}
 	printf("Connecting to peer...");
 	peer_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -102,7 +105,7 @@ tunnel_init(struct tunnel * tun){
 		printf("connected!\n");
 		tun->out_pfd->fd = peer_fd;
 	}
-	return;
+	return 0;
 }
 
 

@@ -17,27 +17,32 @@ RECV_FULL_SIZE = 32768
 
 TUNNEL_TOR = 1
 
-bridges = [("88.198.39.7",563), ("173.255.213.10",110), ("99.20.3.173",443)]
+#bridges = [("88.198.39.7",563), ("173.255.213.10",110), ("99.20.3.173",443)]
+relays = [("149.9.0.59",9001,"8FF73B8FBFBF2CCB52A8E46A515418F97A69C812"),
+          ("38.229.70.51",9001,"482C886A4C5E490A7E9587133F07E61F93DE5477"),
+          ("38.229.70.52",9001,"3E297D59675C93205A1261DD843BEF62EFE32348")]
 fwder = ("127.0.0.1",9999)
 
 class TunnelSetupMsg(object):
     '''
     Header for tunnel setup on forwarder.
     '''
-    def __init__(self, host, port, type):
+    def __init__(self, host, port, type, fp):
         self.host = socket.inet_aton(host)
         self.port = port
         self.type = type
+        self.fp = fp
         
     def pack(self):
-        return ''.join((self.host, struct.pack('!HH',self.port, self.type)))
+        return ''.join((self.host, struct.pack('!HH',self.port, self.type),self.fp))
     
     @staticmethod
     def unpack(body):
         host = struct.unpack_from('!I', body, offset = 0)[0]
         port = struct.unpack_from('!H', body, offset = 4)[0]
         type = struct.unpack_from('!H', body, offset = 6)[0]
-        return TunnelSetupMsg(hos, port, type)                                    
+        fp = body[8:]
+        return TunnelSetupMsg(hos, port, type, fp)                                    
 
 class ForwarderHandler(AsyncoreTcp):
     def __init__(self, tor_client):
@@ -52,9 +57,9 @@ class ForwarderHandler(AsyncoreTcp):
             self.teardown()
             # sys.exit(0)
         # pickup a random bridge from the ones we have.
-        bridge = bridges[random.randint(0,len(bridges) - 1)]
-        logger.info("send connection request for bridge %s:%d" % (bridge[0],bridge[1]))
-        self.enqueue_send(TunnelSetupMsg(bridge[0],bridge[1], TUNNEL_TOR).pack())
+        relay = relays[random.randint(0,len(relays) - 1)]
+        logger.info("send connection request for relay %s:%d" % (relay[0],relay[1]))
+        self.enqueue_send(TunnelSetupMsg(relay[0],relay[1], TUNNEL_TOR, relay[2]).pack())
 
     def handle_read(self):
         data = self.recv(RECV_FULL_SIZE)
