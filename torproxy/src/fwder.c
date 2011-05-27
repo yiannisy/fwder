@@ -21,14 +21,17 @@
 
 #define MAX_SOCKETS 255
 #define MAX_TUNNELS 127
-#define TUN_HDR_LEN 48
 
 #define MAX_RELAYS 10000
-#define DIRECTORY_IP "193.23.244.244"
+#define DIRECTORY_IP "128.31.0.34"
+#define DIRECTORY_PORT 9131
 #define DIRECTORY_URL "dannenberg.ccc.de"
 
 #define TUN_GRANTED 0x5a
 #define TUN_REJECTED 0x5b
+
+static bool is_tor = false;
+static bool is_web = false;
 
 struct tunnel {
 	uint16_t tunnel_id; // unique ID
@@ -41,13 +44,6 @@ struct tunnel {
 	struct pollfd * out_pfd; // outgoig polling socket
 	struct sockaddr_in nexthop_addr; // the address to forward data to
 	char nexthop_fp[41];
-};
-
-struct tunnel_hdr {
-	uint32_t addr;
-	uint16_t port;
-	uint16_t type;
-	char fp[FP_LEN];
 };
 
 struct socks_hdr {
@@ -63,6 +59,7 @@ struct relay_info {
   uint16_t dir_port;
 };
 
+/* Get the latest consensus from a TOR directory. */
 static void
 update_tor_dir(struct relay_info * relays){
   char * buffer;
@@ -83,18 +80,18 @@ update_tor_dir(struct relay_info * relays){
   char crap3[100];
   char crap4[100];
   char crap5[100];
-  
+
   dir_addr.sin_family = AF_INET;
-  dir_addr.sin_port = htons(80);
+  dir_addr.sin_port = htons(DIRECTORY_PORT);
   dir_addr.sin_addr.s_addr = inet_addr(DIRECTORY_IP);
   offset = 0;
-  
+
   buffer = malloc(1000000);
   if(!buffer){
     printf("could not allocate memory for dir info...\n");
     return;
   }
-  
+
   sprintf(path,"/tor/status-vote/current/consensus");
   sprintf(request, "GET %s HTTP/1.0\r\nHOST:%s \r\n\r\n", path, DIRECTORY_URL);
   sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -115,11 +112,11 @@ update_tor_dir(struct relay_info * relays){
     /* check if this is a relay info line
      * and if it is, extract address and ports information */
     if(!strncmp(nextline,"r ",2)){
-      sscanf(nextline,"r %s %s %s %s %s %s %d %d", 
-	     crap1, crap2, crap3, crap4, crap5, 
+      sscanf(nextline,"r %s %s %s %s %s %s %d %d",
+	     crap1, crap2, crap3, crap4, crap5,
 	     relay_addr,&relay_port,&relay_dir_port);
-      relays[i].port = ntohs(relay_port);
-      relays[i].dir_port = ntohs(relay_dir_port);
+      relays[i].port = relay_port;
+      relays[i].dir_port = relay_dir_port;
       relays[i].ipaddr = inet_addr(relay_addr);
       i += 1;
     }
@@ -127,35 +124,6 @@ update_tor_dir(struct relay_info * relays){
   }
   printf("learned %d relays\n", i);
 }
-
-//static void *
-//directory_service(void *arg){
-//	int sock;
-//	struct sockaddr_in dir_addr;
-//	int resp_len = 0;
-//	char buffer[1600];
-//	char response[MAX_RELAY*10000]
-//	int n_read;
-//
-//	char request =
-//
-//
-//	while(1){
-//		printf("Updating from directory\n");
-//		sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-//		if (connect(sock, (struct sockaddr*)dir_addr, sizeof(struct sockaddr)) < 0){
-//			printf("cannot connect to the directory\n");
-//		}
-//		else{
-//			write(sock, request, req_len);
-//			while (n_read = recvfrom(sock, buffer, 32768, 0, NULL, NULL) > 0){
-//				memcpy(response, buffer, n_read);
-//				resp_len += n_read;
-//			}
-//		}
-//
-//	}
-//}
 
 static void
 tunnel_teardown(struct tunnel * tun){
@@ -180,7 +148,6 @@ socks_extract_details(struct tunnel * tun){
 	hdr = (struct socks_hdr *)buffer;
 	addr.s_addr = hdr->ipaddr;
 	username = &buffer[sizeof(struct socks_hdr)];
-	printf("Socks IP:Port:%s:%d (%s)\n",inet_ntoa(addr),ntohs(hdr->port), username);
 
 	if(!strcmp(username,"MOZ")){
 	  tun->type = TUNNEL_WEB;
@@ -203,122 +170,71 @@ tunnel_send_reply(struct tunnel * tun, uint8_t code){
   reply.code = code;
   reply.port = 0;
   reply.ipaddr = 0;
-  
+
   write(tun->in_pfd->fd, (char *)&reply, sizeof(struct socks_hdr));
 }
 
+/* Checks whether a web tunnel request is allowed. */
 static int
-tunnel_extract_details(struct tunnel * tun){
-	struct tunnel_hdr hdr;
-	int n_read;
-	char tmp_buf[41];
-
-	n_read = recvfrom(tun->in_pfd->fd, (char *)&hdr, TUN_HDR_LEN, 0, NULL, NULL);
-	if(n_read != TUN_HDR_LEN){
-		printf("cannot extract tunnel details - not enough info (%d bytes received)\n",
-				n_read);
-	}
-
-	/* add null-based term character */
-	memcpy(tmp_buf,hdr.fp,40);
-	tmp_buf[40] = '\0';
-
-	tun->type = ntohs(hdr.type);
-	tun->nexthop_addr.sin_family = AF_INET;
-	tun->nexthop_addr.sin_port = hdr.port;
-	tun->nexthop_addr.sin_addr.s_addr = hdr.addr;
-	memcpy(tun->nexthop_fp,tmp_buf, 41);
-
-	printf("Setting up tunnel of type %d with %s:%d (fp:%s)\n", tun->type, inet_ntoa(tun->nexthop_addr.sin_addr), ntohs(hdr.port), tmp_buf);
-	return 0;
-}
-
-static int
-tunnel_verify_web(struct tunnel *tun){
-  return -1;
-}
-
-static int
-tunnel_verify_local(struct tunnel * tun, struct relay_info * relays){
-  int i;
-
-  for (i=0;i<3000;i++){
-    if (relays[i].ipaddr == tun->nexthop_addr.sin_addr.s_addr){
-      printf("found relay with same ip address!\n");
-      printf("known relay %d, %d\n",relays[i].port, relays[i].dir_port);
-      printf("desired relay : %s, %d\n",inet_ntoa(tun->nexthop_addr.sin_addr),tun->nexthop_addr.sin_port);
-      return 0;
-    }
-  }
-  return -1;
-}
-  
-
-static int
-tunnel_verify(struct tunnel * tun){
-	char request[1000];
-	char buffer[32768];
-	int offset;
-	char path[1000];
-	int sock, n_read;
-	char * status;
-	struct sockaddr_in dir_addr;
-	dir_addr.sin_family = AF_INET;
-	dir_addr.sin_port = htons(80);
-	dir_addr.sin_addr.s_addr = inet_addr(DIRECTORY_IP);
-	offset = 0;
-
-	return 0;
-	
-	sprintf(path,"/tor/server/fp/%s",tun->nexthop_fp);
-	sprintf(request, "GET %s HTTP/1.0\r\nHOST:%s \r\n\r\n", path, DIRECTORY_URL);
-	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if(connect(sock, (struct sockaddr*)&dir_addr, sizeof(struct sockaddr)) < 0){
-		printf("cannot connect to the directory\n");
-		return -1;
+check_tunnel_web(struct tunnel *tun){
+	if (is_web == true){
+		return 0;
 	}
 	else{
-		write(sock, request, strlen(request));
-		while((n_read = recvfrom(sock, buffer + offset, 32768, 0, NULL, NULL)) > 0){
-			offset += n_read;
-		}
-		/* the first line contains the http response code. */
-		status = strtok(buffer,"\n");
-		if (strstr(status,"200")){
-			/* status is OK! */
-			return 0;
-		}
-		else if(strstr(status,"404")){
-			printf("failed to verify tunnel\n");
-			return 0;
-		}
-		else {
-			printf("unknown status while verifying tunnel: %s\n",status);
-			return -1;
-		}
+		return -1;
 	}
 }
 
+/* Checks whether a tor tunnel request is allowed. */
+static int
+check_tunnel_tor(struct tunnel * tun, struct relay_info * relays){
+	int i;
+
+	if (is_tor == true){
+		return 0;
+	}
+	else{
+		return -1;
+	}
+
+
+	for (i=0;i<3000;i++){
+		if ((tun->nexthop_addr.sin_addr.s_addr == relays[i].ipaddr) &&
+				((tun->nexthop_addr.sin_port == htons(relays[i].port)) ||
+				(tun->nexthop_addr.sin_port == htons(relays[i].dir_port)))){
+			return 0;
+		}
+	}
+	return -1;
+}
+
+/* Initializes a tunnel request.
+ * Checks whether the tunnel is valid. If it is it connects to the other
+ * peer and sets up the tunnel.
+ */
 static int
 tunnel_init(struct tunnel * tun, struct relay_info * relays){
 	int peer_fd;
 
-//	if(tunnel_extract_details(tun) == -1){
 	if(socks_extract_details(tun) == -1){
 		printf("cannot extract tunnel details...\n");
 		return -1;
 	}
 	if(tun->type == TUNNEL_TOR){
-	  if (tunnel_verify_local(tun, relays) == -1){
-	    printf("cannot verify tunnel...\n");
+	  if (check_tunnel_tor(tun, relays) == -1){
+	    printf("Rejecting TOR tunnel to %s:%d\n",
+	    		inet_ntoa(tun->nexthop_addr.sin_addr),
+	    		ntohs(tun->nexthop_addr.sin_port));
 	    tunnel_send_reply(tun,TUN_REJECTED);
 	    tunnel_teardown(tun);
 	    return -1;
 	  }
 	}
 	else if(tun->type == TUNNEL_WEB){
-	  if (tunnel_verify_web(tun) == -1){
-	    printf("web tunnel not granted...\n");
+	  if (check_tunnel_web(tun) == -1){
+	    printf("Rejecting WEB tunnel to %s:%d\n",
+	    		inet_ntoa(tun->nexthop_addr.sin_addr),
+	    		ntohs(tun->nexthop_addr.sin_port));
 	    tunnel_send_reply(tun,TUN_REJECTED);
 	    tunnel_teardown(tun);
 	    return -1;
@@ -330,21 +246,20 @@ tunnel_init(struct tunnel * tun, struct relay_info * relays){
 	  tunnel_teardown(tun);
 	  return -1;
 	}
-	
-	/* if we managed to get up until here we are good */
-	tunnel_send_reply(tun, TUN_GRANTED);
 
-	//	printf("successfully initialized and verified tunnel\n");
-	//	printf("Connecting to peer...");
 	peer_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (connect(peer_fd, (struct sockaddr*)&tun->nexthop_addr, sizeof(struct sockaddr)) < 0){
+	if (connect(peer_fd, (struct sockaddr*)&tun->nexthop_addr,
+			sizeof(struct sockaddr)) < 0){
 		printf("cannot connect to peer - skipping tunnel...\n");
 		tunnel_teardown(tun);
 	}
 	else{
-	  printf("Setup tunnel of type %d to %s:%d\n",tun->type,inet_ntoa(tun->nexthop_addr.sin_addr),
-		 ntohs(tun->nexthop_addr.sin_port));
-		 //		printf("connected!\n");
+		/* if we managed to get up until here we are good */
+		tunnel_send_reply(tun, TUN_GRANTED);
+		printf("Setup tunnel of type %s to %s:%d\n",
+				(tun->type == TUNNEL_TOR)? "TOR": "WEB",
+				inet_ntoa(tun->nexthop_addr.sin_addr),
+				ntohs(tun->nexthop_addr.sin_port));
 		tun->out_pfd->fd = peer_fd;
 	}
 	return 0;
@@ -359,13 +274,11 @@ tunnel_forward(struct pollfd *a, struct pollfd *b, struct tunnel * tun){
 	n_read = n_write = 0;
 	n_read = recvfrom(a->fd, buffer, 32768, 0, NULL, NULL);
 	if(n_read == 0){
-		printf("No data received - teardown the tunnel\n");
 		tunnel_teardown(tun);
 	}
 	else{
 		n_write = write(b->fd, buffer, n_read);
 		if(n_write == 0){
-			printf("No data written - teardown the tunnel\n");
 			tunnel_teardown(tun);
 		}
 	}
@@ -374,6 +287,10 @@ tunnel_forward(struct pollfd *a, struct pollfd *b, struct tunnel * tun){
 	}
 }
 
+/* Checks whether any of the two ends of the tunnel is ready.
+ * Depending on the situation, it will initialize the tunnel, forward data
+ * over it, or teardown the tunnel.
+ */
 static void
 process_tunnel(struct tunnel * tun, struct relay_info * relays){
 	if (tun->in_pfd->revents & (POLLIN | POLLERR)){
@@ -402,7 +319,7 @@ process_tunnel(struct tunnel * tun, struct relay_info * relays){
 }
 
 
-/* looks the first (listening) socket for listening connections.
+/* Looks the first (listening) socket for listening connections.
  * If one exists, accept it and assign a new tunnel for it.
  */
 static void
@@ -425,12 +342,33 @@ check_new_connection(struct pollfd * fds, struct tunnel * tunnels){
 		if (i == MAX_TUNNELS){
 			printf("error - no tunnel available...\n");
 		}
-		else{
-			printf("accepted new connection from tor-client\n");
-		}
-
 	}
 }
+
+/* Parse options. */
+static void
+parse_options(int argc, char *argv[])
+{
+	int c;
+
+	while( (c = getopt(argc, argv, "tw")) != -1) {
+		switch(c)
+			{
+			case 't':
+				printf("Accepting Requests for TOR tunnels\n");
+				is_tor = true;
+				break;
+			case 'w':
+				printf("Accepting Requests for WEB tunnels\n");
+				is_web = true;
+				break;
+			default:
+				printf("unknown option\n");
+				break;
+			}
+	}
+}
+
 
 int
 main(int argc, char *argv[])
@@ -439,17 +377,19 @@ main(int argc, char *argv[])
 	int i;
 	int listen_fd;
 	int max_fd, n_ready;
+	/* TODO: this should definitely be replaced by a
+	 * hash-table or bloom filter. */
 	struct relay_info relays[3000];
 	struct sockaddr_in listen_addr;
 	struct pollfd fds[MAX_SOCKETS];
 	struct tunnel tunnels[MAX_TUNNELS];
 
-	struct tunnel known_relays[MAX_RELAYS];
-	pthread_t dir_serv;
-	/* start a thread for directory updates */
-//	pthread_create(&dir_serv,NULL, directory_service, known_relays);
+	parse_options(argc,argv);
 
-
+	if(is_tor == true){
+		printf("Downloading TOR directory\n");
+		update_tor_dir(relays);
+	}
 
 	/* initialize the sockets */
 	for (i=0; i < MAX_SOCKETS; i++){
@@ -493,8 +433,6 @@ main(int argc, char *argv[])
 	fds[0].fd = listen_fd;
 	fds[0].events = POLLIN;
 	max_fd = 0;
-	printf("Downloading TOR directory\n");
-	update_tor_dir(relays);
 
 	printf("Listening for new tunnel requests\n");
 	for ( ; ; ){
@@ -517,5 +455,6 @@ main(int argc, char *argv[])
 		/* if time has elapsed, update the directories */
 		// update_tor_dir();
 
+		fflush(stdout);
 	}
 }
